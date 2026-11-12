@@ -1,0 +1,107 @@
+//@version=6
+indicator("Cung Cầu — Supply & Demand Zones", shorttitle="Cung-Cầu S/D", overlay=true, max_boxes_count=20, max_labels_count=200)
+
+// Cung-Cầu (supply/demand) visual aid.
+// Pivot zones are confirmed only after `Pivot bars` bars to the right; this
+// confirmation delay is intentional and avoids drawing unconfirmed pivots.
+
+// ── Inputs ────────────────────────────────────────────────────────────────
+string GROUP_ZONES = "Vùng cung / cầu"
+int pivotLen = input.int(5, "Pivot bars trái/phải", minval=2, maxval=30, group=GROUP_ZONES)
+int zoneKeep = input.int(1, "Số vùng mỗi phía", minval=1, maxval=5, group=GROUP_ZONES)
+
+string GROUP_SIGNALS = "Tín hiệu hồi kiểm tra vùng"
+bool showSignals = input.bool(true, "Hiện tín hiệu MUA/BÁN", group=GROUP_SIGNALS)
+bool useVolume = input.bool(false, "Lọc bằng khối lượng cao hơn trung bình", group=GROUP_SIGNALS)
+int volumeLen = input.int(20, "Chu kỳ trung bình khối lượng", minval=1, group=GROUP_SIGNALS)
+bool useTrend = input.bool(false, "Lọc xu hướng bằng EMA", group=GROUP_SIGNALS)
+int trendLen = input.int(50, "Chu kỳ EMA xu hướng", minval=1, group=GROUP_SIGNALS)
+
+string GROUP_STYLE = "Hiển thị"
+bool showTrendEma = input.bool(false, "Hiện EMA xu hướng", group=GROUP_STYLE)
+color demandColor = input.color(color.rgb(0, 150, 136), "Màu vùng cầu", group=GROUP_STYLE)
+color supplyColor = input.color(color.rgb(239, 83, 80), "Màu vùng cung", group=GROUP_STYLE)
+
+// ── Confirmed swing pivots ───────────────────────────────────────────────
+float pivotLow = ta.pivotlow(low, pivotLen, pivotLen)
+float pivotHigh = ta.pivothigh(high, pivotLen, pivotLen)
+
+// Store active demand/supply zones as boxes. A demand zone spans the pivot
+// candle's low to the top of its body; a supply zone spans the body top to its high.
+var box[] demandBoxes = array.new<box>()
+var float[] demandTops = array.new<float>()
+var float[] demandBottoms = array.new<float>()
+var box[] supplyBoxes = array.new<box>()
+var float[] supplyTops = array.new<float>()
+var float[] supplyBottoms = array.new<float>()
+
+if not na(pivotLow)
+    float newDemandTop = math.max(open[pivotLen], close[pivotLen])
+    float newDemandBottom = low[pivotLen]
+    box newDemand = box.new(left=bar_index - pivotLen, top=newDemandTop, right=bar_index, bottom=newDemandBottom, xloc=xloc.bar_index, extend=extend.right, bgcolor=color.new(demandColor, 84), border_color=color.new(demandColor, 20))
+    array.unshift(demandBoxes, newDemand)
+    array.unshift(demandTops, newDemandTop)
+    array.unshift(demandBottoms, newDemandBottom)
+    if array.size(demandBoxes) > zoneKeep
+        box.delete(array.pop(demandBoxes))
+        array.pop(demandTops)
+        array.pop(demandBottoms)
+
+if not na(pivotHigh)
+    float newSupplyTop = high[pivotLen]
+    float newSupplyBottom = math.min(open[pivotLen], close[pivotLen])
+    box newSupply = box.new(left=bar_index - pivotLen, top=newSupplyTop, right=bar_index, bottom=newSupplyBottom, xloc=xloc.bar_index, extend=extend.right, bgcolor=color.new(supplyColor, 84), border_color=color.new(supplyColor, 20))
+    array.unshift(supplyBoxes, newSupply)
+    array.unshift(supplyTops, newSupplyTop)
+    array.unshift(supplyBottoms, newSupplyBottom)
+    if array.size(supplyBoxes) > zoneKeep
+        box.delete(array.pop(supplyBoxes))
+        array.pop(supplyTops)
+        array.pop(supplyBottoms)
+
+// Remove zones after a confirmed close breaks through them. Iterate backwards
+// so removing an item cannot skip the next item.
+int demandIndex = array.size(demandBoxes) - 1
+while demandIndex >= 0
+    float zoneBottom = array.get(demandBottoms, demandIndex)
+    if barstate.isconfirmed and close < zoneBottom
+        box.delete(array.get(demandBoxes, demandIndex))
+        array.remove(demandBoxes, demandIndex)
+        array.remove(demandTops, demandIndex)
+        array.remove(demandBottoms, demandIndex)
+    demandIndex -= 1
+
+int supplyIndex = array.size(supplyBoxes) - 1
+while supplyIndex >= 0
+    float zoneTop = array.get(supplyTops, supplyIndex)
+    if barstate.isconfirmed and close > zoneTop
+        box.delete(array.get(supplyBoxes, supplyIndex))
+        array.remove(supplyBoxes, supplyIndex)
+        array.remove(supplyTops, supplyIndex)
+        array.remove(supplyBottoms, supplyIndex)
+    supplyIndex -= 1
+
+// ── Rejection / retest signals ──────────────────────────────────────────
+float nearestDemandTop = array.size(demandTops) > 0 ? array.get(demandTops, 0) : na
+float nearestDemandBottom = array.size(demandBottoms) > 0 ? array.get(demandBottoms, 0) : na
+float nearestSupplyTop = array.size(supplyTops) > 0 ? array.get(supplyTops, 0) : na
+float nearestSupplyBottom = array.size(supplyBottoms) > 0 ? array.get(supplyBottoms, 0) : na
+
+bool demandOverlap = not na(nearestDemandTop) and low <= nearestDemandTop and high >= nearestDemandBottom
+bool supplyOverlap = not na(nearestSupplyBottom) and high >= nearestSupplyBottom and low <= nearestSupplyTop
+bool volumeOk = not useVolume or volume > ta.sma(volume, volumeLen)
+float trendEma = ta.ema(close, trendLen)
+bool longTrendOk = not useTrend or close > trendEma
+bool shortTrendOk = not useTrend or close < trendEma
+
+// Signals require a confirmed candle, a zone touch, and a close back beyond
+// the zone edge in the rejection direction. One signal per continuous touch.
+bool longSignal = showSignals and barstate.isconfirmed and demandOverlap and not demandOverlap[1] and close > nearestDemandTop and close > open and volumeOk and longTrendOk
+bool shortSignal = showSignals and barstate.isconfirmed and supplyOverlap and not supplyOverlap[1] and close < nearestSupplyBottom and close < open and volumeOk and shortTrendOk
+
+plot(showTrendEma ? trendEma : na, title="EMA xu hướng", color=color.orange, linewidth=2)
+plotshape(longSignal, title="MUA — bật lên từ vùng cầu", text="MUA", style=shape.labelup, location=location.belowbar, color=color.new(demandColor, 0), textcolor=color.white, size=size.tiny)
+plotshape(shortSignal, title="BÁN — bị từ chối tại vùng cung", text="BÁN", style=shape.labeldown, location=location.abovebar, color=color.new(supplyColor, 0), textcolor=color.white, size=size.tiny)
+
+alertcondition(longSignal, title="MUA: hồi kiểm tra vùng cầu", message="MUA: nến xác nhận bật lên từ vùng cầu trên {{ticker}} ({{interval}}).")
+alertcondition(shortSignal, title="BÁN: hồi kiểm tra vùng cung", message="BÁN: nến xác nhận bị từ chối tại vùng cung trên {{ticker}} ({{interval}}).")
